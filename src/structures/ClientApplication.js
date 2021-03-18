@@ -1,209 +1,71 @@
-const Snowflake = require('../util/Snowflake');
-const Constants = require('../util/Constants');
+'use strict';
+
+const Team = require('./Team');
+const Application = require('./interfaces/Application');
 
 /**
  * Represents a Client OAuth2 Application.
+ * @extends {Application}
  */
-class ClientApplication {
-  constructor(client, data) {
-    /**
-     * The client that instantiated the application
-     * @name ClientApplication#client
-     * @type {Client}
-     * @readonly
-     */
-    Object.defineProperty(this, 'client', { value: client });
-
-    this.setup(data);
-  }
-
-  setup(data) {
-    /**
-     * The ID of the app
-     * @type {Snowflake}
-     */
-    this.id = data.id;
+class ClientApplication extends Application {
+  _patch(data) {
+    super._patch(data);
 
     /**
-     * The name of the app
-     * @type {string}
-     */
-    this.name = data.name;
-
-    /**
-     * The app's description
-     * @type {string}
-     */
-    this.description = data.description;
-
-    /**
-     * The app's icon hash
-     * @type {string}
-     */
-    this.icon = data.icon;
-
-    /**
-     * The app's cover image hash
+     * The app's cover image
      * @type {?string}
      */
-    this.cover = data.cover_image;
+    this.cover = data.cover_image || null;
 
     /**
-     * The app's RPC origins
-     * @type {?string[]}
-     */
-    this.rpcOrigins = data.rpc_origins;
-
-    /**
-     * The app's redirect URIs
+     * The app's RPC origins, if enabled
      * @type {string[]}
      */
-    this.redirectURIs = data.redirect_uris;
+    this.rpcOrigins = data.rpc_origins || [];
 
     /**
      * If this app's bot requires a code grant when using the OAuth2 flow
-     * @type {boolean}
+     * @type {?boolean}
      */
-    this.botRequireCodeGrant = data.bot_require_code_grant;
+    this.botRequireCodeGrant = typeof data.bot_require_code_grant !== 'undefined' ? data.bot_require_code_grant : null;
 
     /**
      * If this app's bot is public
-     * @type {boolean}
+     * @type {?boolean}
      */
-    this.botPublic = data.bot_public;
+    this.botPublic = typeof data.bot_public !== 'undefined' ? data.bot_public : null;
 
     /**
-     * If this app can use rpc
-     * @type {boolean}
+     * The owner of this OAuth application
+     * @type {?User|Team}
      */
-    this.rpcApplicationState = data.rpc_application_state;
-
-    /**
-     * Object containing basic info about this app's bot
-     * @type {Object}
-     */
-    this.bot = data.bot;
-
-    /**
-     * The flags for the app
-     * @type {number}
-     */
-    this.flags = data.flags;
-
-    /**
-     * OAuth2 secret for the application
-     * @type {string}
-     */
-    this.secret = data.secret;
-
-    if (data.owner) {
-      /**
-       * The owner of this OAuth application
-       * @type {?User}
-       */
-      this.owner = this.client.dataManager.newUser(data.owner);
-    }
+    this.owner = data.team ? new Team(this.client, data.team) : data.owner ? this.client.users.add(data.owner) : null;
   }
 
   /**
-   * The timestamp the app was created at
-   * @type {number}
-   * @readonly
+   * Fetch the commands associated with this application. See {@link InteractionClient}.
+   * @returns {ApplicationCommand[]} A list of commands.
    */
-  get createdTimestamp() {
-    return Snowflake.deconstruct(this.id).timestamp;
+  fetchCommands() {
+    return this.client.interactionClient.fetchCommands();
   }
 
   /**
-   * The time the app was created
-   * @type {Date}
-   * @readonly
+   * Set the commands for this application. See {@link InteractionClient}.
+   * @param {ApplicationCommandOptions[]} commands The command description.
+   * @returns {ApplicationCommand[]} The created commands.
    */
-  get createdAt() {
-    return new Date(this.createdTimestamp);
+  setCommands(commands) {
+    return this.client.interactionClient.setCommands(commands);
   }
 
   /**
-   * A link to the application's icon.
-   * @param {Object} [options={}] Options for the icon url
-   * @param {string} [options.format='webp'] One of `webp`, `png`, `jpg`
-   * @param {number} [options.size=128] One of `128`, '256', `512`, `1024`, `2048`
-   * @returns {?string} URL to the icon
+   * Create a command. See {@link InteractionClient}.
+   * @param {ApplicationCommandOptions} command The command description.
+   * @returns {ApplicationCommand} The created command.
    */
-  iconURL({ format, size } = {}) {
-    if (!this.icon) return null;
-    return Constants.Endpoints.CDN(this.client.options.http.cdn).AppIcon(this.id, this.icon, { format, size });
-  }
-
-  /**
-   * A link to this application's cover image.
-   * @param {Object} [options={}] Options for the cover image url
-   * @param {string} [options.format='webp'] One of `webp`, `png`, `jpg`
-   * @param {number} [options.size=128] One of `128`, '256', `512`, `1024`, `2048`
-   * @returns {?string} URL to the cover image
-   */
-  coverImage({ format, size } = {}) {
-    if (!this.cover) return null;
-    return Constants.Endpoints
-      .CDN(this.client.options.http.cdn)
-      .AppIcon(this.id, this.cover, { format, size });
-  }
-
-  /**
-   * Get rich presence assets.
-   * @returns {Promise<Object>}
-   */
-  fetchAssets() {
-    return this.client.api.applications(this.id).assets.get()
-      .then(assets => assets.map(a => ({
-        id: a.id,
-        name: a.name,
-        type: Object.keys(Constants.ClientApplicationAssetTypes)[a.type - 1],
-      })));
-  }
-
-  /**
-   * Create a rich presence asset.
-   * @param {string} name Name of the asset
-   * @param {Base64Resolvable} data Data of the asset
-   * @param {string} type Type of the asset. `big`, or `small`
-   * @returns {Promise}
-   */
-  createAsset(name, data, type) {
-    return this.client.resolveBase64(data).then(b64 =>
-      this.client.api.applications(this.id).assets.post({ data: {
-        name,
-        data: b64,
-        type: Constants.ClientApplicationAssetTypes[type.toUpperCase()],
-      } }));
-  }
-
-  /**
-   * Reset the app's secret.
-   * <warn>This is only available when using a user account.</warn>
-   * @returns {OAuth2Application}
-   */
-  resetSecret() {
-    return this.client.api.oauth2.applications[this.id].reset.post()
-      .then(app => new ClientApplication(this.client, app));
-  }
-
-  /**
-   * Reset the app's bot token.
-   * <warn>This is only available when using a user account.</warn>
-   * @returns {OAuth2Application}
-   */
-  resetToken() {
-    return this.client.api.oauth2.applications[this.id].bot.reset.post()
-      .then(app => new ClientApplication(this.client, Object.assign({}, this, { bot: app })));
-  }
-
-  /**
-   * When concatenated with a string, this automatically concatenates the app name rather than the app object.
-   * @returns {string}
-   */
-  toString() {
-    return this.name;
+  createCommand(command) {
+    return this.client.interactionClient.createCommand(command);
   }
 }
 

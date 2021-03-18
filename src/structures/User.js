@@ -1,57 +1,92 @@
+'use strict';
+
+const Base = require('./Base');
 const TextBasedChannel = require('./interfaces/TextBasedChannel');
-const Constants = require('../util/Constants');
-const { Presence } = require('./Presence');
-const UserProfile = require('./UserProfile');
-const Snowflake = require('../util/Snowflake');
 const { Error } = require('../errors');
+const Snowflake = require('../util/Snowflake');
+const UserFlags = require('../util/UserFlags');
+
+let Structures;
 
 /**
  * Represents a user on Discord.
  * @implements {TextBasedChannel}
+ * @extends {Base}
  */
-class User {
+class User extends Base {
+  /**
+   * @param {Client} client The instantiating client
+   * @param {Object} data The data for the user
+   */
   constructor(client, data) {
-    /**
-     * The client that created the instance of the user
-     * @name User#client
-     * @type {Client}
-     * @readonly
-     */
-    Object.defineProperty(this, 'client', { value: client });
+    super(client);
 
-    if (data) this.setup(data);
-  }
-
-  setup(data) {
     /**
      * The ID of the user
      * @type {Snowflake}
      */
     this.id = data.id;
 
-    /**
-     * The username of the user
-     * @type {string}
-     */
-    this.username = data.username;
+    this.system = null;
+    this.flags = null;
 
-    /**
-     * A discriminator based on username for the user
-     * @type {string}
-     */
-    this.discriminator = data.discriminator;
+    this._patch(data);
+  }
 
-    /**
-     * The ID of the user's avatar
-     * @type {string}
-     */
-    this.avatar = data.avatar;
+  _patch(data) {
+    if ('username' in data) {
+      /**
+       * The username of the user
+       * @type {?string}
+       */
+      this.username = data.username;
+    } else if (typeof this.username !== 'string') {
+      this.username = null;
+    }
 
-    /**
-     * Whether or not the user is a bot
-     * @type {boolean}
-     */
-    this.bot = Boolean(data.bot);
+    if ('bot' in data || typeof this.bot !== 'boolean') {
+      /**
+       * Whether or not the user is a bot
+       * @type {boolean}
+       */
+      this.bot = Boolean(data.bot);
+    }
+
+    if ('discriminator' in data) {
+      /**
+       * A discriminator based on username for the user
+       * @type {?string}
+       */
+      this.discriminator = data.discriminator;
+    } else if (typeof this.discriminator !== 'string') {
+      this.discriminator = null;
+    }
+
+    if ('avatar' in data) {
+      /**
+       * The ID of the user's avatar
+       * @type {?string}
+       */
+      this.avatar = data.avatar;
+    } else if (typeof this.avatar !== 'string') {
+      this.avatar = null;
+    }
+
+    if ('system' in data) {
+      /**
+       * Whether the user is an Official Discord System user (part of the urgent message system)
+       * @type {?boolean}
+       */
+      this.system = Boolean(data.system);
+    }
+
+    if ('public_flags' in data) {
+      /**
+       * The flags for this user
+       * @type {?UserFlags}
+       */
+      this.flags = new UserFlags(data.public_flags);
+    }
 
     /**
      * The ID of the last message sent by the user, if one was sent
@@ -60,17 +95,19 @@ class User {
     this.lastMessageID = null;
 
     /**
-     * The Message object of the last message sent by the user, if one was sent
-     * @type {?Message}
+     * The ID of the channel for the last message sent by the user, if one was sent
+     * @type {?Snowflake}
      */
-    this.lastMessage = null;
+    this.lastMessageChannelID = null;
   }
 
-  patch(data) {
-    for (const prop of ['id', 'username', 'discriminator', 'avatar', 'bot']) {
-      if (typeof data[prop] !== 'undefined') this[prop] = data[prop];
-    }
-    if (data.token) this.client.token = data.token;
+  /**
+   * Whether this User is a partial
+   * @type {boolean}
+   * @readonly
+   */
+  get partial() {
+    return typeof this.username !== 'string';
   }
 
   /**
@@ -83,7 +120,7 @@ class User {
   }
 
   /**
-   * The time the user was created
+   * The time the user was created at
    * @type {Date}
    * @readonly
    */
@@ -92,29 +129,37 @@ class User {
   }
 
   /**
+   * The Message object of the last message sent by the user, if one was sent
+   * @type {?Message}
+   * @readonly
+   */
+  get lastMessage() {
+    const channel = this.client.channels.cache.get(this.lastMessageChannelID);
+    return (channel && channel.messages.cache.get(this.lastMessageID)) || null;
+  }
+
+  /**
    * The presence of this user
    * @type {Presence}
    * @readonly
    */
   get presence() {
-    if (this.client.presences.has(this.id)) return this.client.presences.get(this.id);
-    for (const guild of this.client.guilds.values()) {
-      if (guild.presences.has(this.id)) return guild.presences.get(this.id);
+    for (const guild of this.client.guilds.cache.values()) {
+      if (guild.presences.cache.has(this.id)) return guild.presences.cache.get(this.id);
     }
-    return new Presence();
+    if (!Structures) Structures = require('../util/Structures');
+    const Presence = Structures.get('Presence');
+    return new Presence(this.client, { user: { id: this.id } });
   }
 
   /**
    * A link to the user's avatar.
-   * @param {Object} [options={}] Options for the avatar url
-   * @param {string} [options.format='webp'] One of `webp`, `png`, `jpg`, `gif`. If no format is provided,
-   * it will be `gif` for animated avatars or otherwise `webp`
-   * @param {number} [options.size=128] One of `128`, `256`, `512`, `1024`, `2048`
+   * @param {ImageURLOptions} [options={}] Options for the Image URL
    * @returns {?string}
    */
-  avatarURL({ format, size } = {}) {
+  avatarURL({ format, size, dynamic } = {}) {
     if (!this.avatar) return null;
-    return Constants.Endpoints.CDN(this.client.options.http.cdn).Avatar(this.id, this.avatar, format, size);
+    return this.client.rest.cdn.Avatar(this.id, this.avatar, format, size, dynamic);
   }
 
   /**
@@ -123,16 +168,13 @@ class User {
    * @readonly
    */
   get defaultAvatarURL() {
-    return Constants.Endpoints.CDN(this.client.options.http.cdn).DefaultAvatar(this.discriminator % 5);
+    return this.client.rest.cdn.DefaultAvatar(this.discriminator % 5);
   }
 
   /**
    * A link to the user's avatar if they have one.
    * Otherwise a link to their default avatar will be returned.
-   * @param {Object} [options={}] Options for the avatar url
-   * @param {string} [options.format='webp'] One of `webp`, `png`, `jpg`, `gif`. If no format is provided,
-   * it will be `gif` for animated avatars or otherwise `webp`
-   * @param {number} [options.size=128] One of `128`, '256', `512`, `1024`, `2048`
+   * @param {ImageURLOptions} [options={}] Options for the Image URL
    * @returns {string}
    */
   displayAvatarURL(options) {
@@ -140,51 +182,41 @@ class User {
   }
 
   /**
-   * The Discord "tag" for this user
-   * @type {string}
-   * @readonly
-   */
-  get tag() {
-    return `${this.username}#${this.discriminator}`;
-  }
-
-  /**
-   * The note that is set for the user
-   * <warn>This is only available when using a user account.</warn>
+   * The Discord "tag" (e.g. `hydrabolt#0001`) for this user
    * @type {?string}
    * @readonly
    */
-  get note() {
-    return this.client.user.notes.get(this.id) || null;
+  get tag() {
+    return typeof this.username === 'string' ? `${this.username}#${this.discriminator}` : null;
   }
 
   /**
-   * Check whether the user is typing in a channel.
+   * Checks whether the user is typing in a channel.
    * @param {ChannelResolvable} channel The channel to check in
    * @returns {boolean}
    */
   typingIn(channel) {
-    channel = this.client.resolver.resolveChannel(channel);
+    channel = this.client.channels.resolve(channel);
     return channel._typing.has(this.id);
   }
 
   /**
-   * Get the time that the user started typing.
+   * Gets the time that the user started typing.
    * @param {ChannelResolvable} channel The channel to get the time in
    * @returns {?Date}
    */
   typingSinceIn(channel) {
-    channel = this.client.resolver.resolveChannel(channel);
+    channel = this.client.channels.resolve(channel);
     return channel._typing.has(this.id) ? new Date(channel._typing.get(this.id).since) : null;
   }
 
   /**
-   * Get the amount of time the user has been typing in a channel for (in milliseconds), or -1 if they're not typing.
+   * Gets the amount of time the user has been typing in a channel for (in milliseconds), or -1 if they're not typing.
    * @param {ChannelResolvable} channel The channel to get the time in
    * @returns {number}
    */
   typingDurationIn(channel) {
-    channel = this.client.resolver.resolveChannel(channel);
+    channel = this.client.channels.resolve(channel);
     return channel._typing.has(this.id) ? channel._typing.get(this.id).elapsedTime : -1;
   }
 
@@ -194,49 +226,38 @@ class User {
    * @readonly
    */
   get dmChannel() {
-    return this.client.channels.filter(c => c.type === 'dm').find(c => c.recipient.id === this.id);
+    return this.client.channels.cache.find(c => c.type === 'dm' && c.recipient.id === this.id) || null;
   }
 
   /**
    * Creates a DM channel between the client and the user.
+   * @param {boolean} [force=false] Whether to skip the cache check and request the API
    * @returns {Promise<DMChannel>}
    */
-  createDM() {
-    if (this.dmChannel) return Promise.resolve(this.dmChannel);
-    return this.client.api.users(this.client.user.id).channels.post({ data: {
-      recipient_id: this.id,
-    } })
-      .then(data => this.client.actions.ChannelCreate.handle(data).channel);
+  async createDM(force = false) {
+    if (!force) {
+      const { dmChannel } = this;
+      if (dmChannel && !dmChannel.partial) return dmChannel;
+    }
+
+    const data = await this.client.api.users(this.client.user.id).channels.post({
+      data: {
+        recipient_id: this.id,
+      },
+    });
+    return this.client.channels.add(data);
   }
 
   /**
    * Deletes a DM channel (if one exists) between the client and the user. Resolves with the channel if successful.
    * @returns {Promise<DMChannel>}
    */
-  deleteDM() {
-    if (!this.dmChannel) return Promise.reject(new Error('USER_NO_DMCHANNEL'));
-    return this.client.api.channels(this.dmChannel.id).delete()
-      .then(data => this.client.actions.ChannelDelete.handle(data).channel);
-  }
-
-  /**
-   * Get the profile of the user.
-   * <warn>This is only available when using a user account.</warn>
-   * @returns {Promise<UserProfile>}
-   */
-  fetchProfile() {
-    return this.client.api.users(this.id).profile.get().then(data => new UserProfile(this, data));
-  }
-
-  /**
-   * Sets a note for the user.
-   * <warn>This is only available when using a user account.</warn>
-   * @param {string} note The note to set for the user
-   * @returns {Promise<User>}
-   */
-  setNote(note) {
-    return this.client.api.users('@me').notes(this.id).put({ data: { note } })
-      .then(() => this);
+  async deleteDM() {
+    const { dmChannel } = this;
+    if (!dmChannel) throw new Error('USER_NO_DMCHANNEL');
+    await this.client.api.channels(dmChannel.id).delete();
+    this.client.channels.remove(dmChannel.id);
+    return dmChannel;
   }
 
   /**
@@ -246,25 +267,62 @@ class User {
    * @returns {boolean}
    */
   equals(user) {
-    let equal = user &&
+    let equal =
+      user &&
       this.id === user.id &&
       this.username === user.username &&
       this.discriminator === user.discriminator &&
-      this.avatar === user.avatar &&
-      this.bot === Boolean(user.bot);
+      this.avatar === user.avatar;
 
     return equal;
   }
 
   /**
-   * When concatenated with a string, this automatically concatenates the user's mention instead of the User object.
+   * Fetches this user's flags.
+   * @param {boolean} [force=false] Whether to skip the cache check and request the API
+   * @returns {Promise<UserFlags>}
+   */
+  async fetchFlags(force = false) {
+    if (this.flags && !force) return this.flags;
+    const data = await this.client.api.users(this.id).get();
+    this._patch(data);
+    return this.flags;
+  }
+
+  /**
+   * Fetches this user.
+   * @param {boolean} [force=false] Whether to skip the cache check and request the API
+   * @returns {Promise<User>}
+   */
+  fetch(force = false) {
+    return this.client.users.fetch(this.id, true, force);
+  }
+
+  /**
+   * When concatenated with a string, this automatically returns the user's mention instead of the User object.
    * @returns {string}
    * @example
-   * // logs: Hello from <@123456789>!
+   * // Logs: Hello from <@123456789012345678>!
    * console.log(`Hello from ${user}!`);
    */
   toString() {
     return `<@${this.id}>`;
+  }
+
+  toJSON(...props) {
+    const json = super.toJSON(
+      {
+        createdTimestamp: true,
+        defaultAvatarURL: true,
+        tag: true,
+        lastMessage: false,
+        lastMessageID: false,
+      },
+      ...props,
+    );
+    json.avatarURL = this.avatarURL();
+    json.displayAvatarURL = this.displayAvatarURL();
+    return json;
   }
 
   // These are here only for documentation purposes - they are implemented by TextBasedChannel

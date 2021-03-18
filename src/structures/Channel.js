@@ -1,35 +1,42 @@
+'use strict';
+
+const Base = require('./Base');
+const { ChannelTypes } = require('../util/Constants');
 const Snowflake = require('../util/Snowflake');
-const Constants = require('../util/Constants');
 
 /**
  * Represents any channel on Discord.
+ * @extends {Base}
+ * @abstract
  */
-class Channel {
+class Channel extends Base {
   constructor(client, data) {
-    /**
-     * The client that instantiated the Channel
-     * @name Channel#client
-     * @type {Client}
-     * @readonly
-     */
-    Object.defineProperty(this, 'client', { value: client });
+    super(client);
 
-    const type = Object.keys(Constants.ChannelTypes)[data.type];
+    const type = Object.keys(ChannelTypes)[data.type];
     /**
      * The type of the channel, either:
      * * `dm` - a DM channel
-     * * `group` - a Group DM channel
      * * `text` - a guild text channel
      * * `voice` - a guild voice channel
+     * * `category` - a guild category channel
+     * * `news` - a guild news channel
+     * * `store` - a guild store channel
      * * `unknown` - a generic channel of unknown type, could be Channel or GuildChannel
      * @type {string}
      */
     this.type = type ? type.toLowerCase() : 'unknown';
 
-    if (data) this.setup(data);
+    /**
+     * Whether the channel has been deleted
+     * @type {boolean}
+     */
+    this.deleted = false;
+
+    if (data) this._patch(data);
   }
 
-  setup(data) {
+  _patch(data) {
     /**
      * The unique ID of the channel
      * @type {Snowflake}
@@ -47,7 +54,7 @@ class Channel {
   }
 
   /**
-   * The time the channel was created
+   * The time the channel was created at
    * @type {Date}
    * @readonly
    */
@@ -56,47 +63,98 @@ class Channel {
   }
 
   /**
+   * When concatenated with a string, this automatically returns the channel's mention instead of the Channel object.
+   * @returns {string}
+   * @example
+   * // Logs: Hello from <#123456789012345678>!
+   * console.log(`Hello from ${channel}!`);
+   */
+  toString() {
+    return `<#${this.id}>`;
+  }
+
+  /**
    * Deletes this channel.
    * @returns {Promise<Channel>}
    * @example
    * // Delete the channel
    * channel.delete()
-   *   .then() // Success
-   *   .catch(console.error); // Log error
+   *   .then(console.log)
+   *   .catch(console.error);
    */
   delete() {
-    return this.client.api.channels(this.id).delete().then(() => this);
+    return this.client.api
+      .channels(this.id)
+      .delete()
+      .then(() => this);
+  }
+
+  /**
+   * Fetches this channel.
+   * @param {boolean} [force=false] Whether to skip the cache check and request the API
+   * @returns {Promise<Channel>}
+   */
+  fetch(force = false) {
+    return this.client.channels.fetch(this.id, true, force);
+  }
+
+  /**
+   * Indicates whether this channel is text-based.
+   * @returns {boolean}
+   */
+  isText() {
+    return 'messages' in this;
   }
 
   static create(client, data, guild) {
-    const DMChannel = require('./DMChannel');
-    const GroupDMChannel = require('./GroupDMChannel');
-    const TextChannel = require('./TextChannel');
-    const VoiceChannel = require('./VoiceChannel');
-    const GuildChannel = require('./GuildChannel');
-    const types = Constants.ChannelTypes;
+    const Structures = require('../util/Structures');
     let channel;
-    if (data.type === types.DM) {
-      channel = new DMChannel(client, data);
-    } else if (data.type === types.GROUP) {
-      channel = new GroupDMChannel(client, data);
+    if (!data.guild_id && !guild) {
+      if ((data.recipients && data.type !== ChannelTypes.GROUP) || data.type === ChannelTypes.DM) {
+        const DMChannel = Structures.get('DMChannel');
+        channel = new DMChannel(client, data);
+      } else if (data.type === ChannelTypes.GROUP) {
+        const PartialGroupDMChannel = require('./PartialGroupDMChannel');
+        channel = new PartialGroupDMChannel(client, data);
+      }
     } else {
-      guild = guild || client.guilds.get(data.guild_id);
+      guild = guild || client.guilds.cache.get(data.guild_id);
       if (guild) {
         switch (data.type) {
-          case types.TEXT:
+          case ChannelTypes.TEXT: {
+            const TextChannel = Structures.get('TextChannel');
             channel = new TextChannel(guild, data);
             break;
-          case types.VOICE:
+          }
+          case ChannelTypes.VOICE: {
+            const VoiceChannel = Structures.get('VoiceChannel');
             channel = new VoiceChannel(guild, data);
             break;
-          default:
-            channel = new GuildChannel(guild, data);
+          }
+          case ChannelTypes.CATEGORY: {
+            const CategoryChannel = Structures.get('CategoryChannel');
+            channel = new CategoryChannel(guild, data);
+            break;
+          }
+          case ChannelTypes.NEWS: {
+            const NewsChannel = Structures.get('NewsChannel');
+            channel = new NewsChannel(guild, data);
+            break;
+          }
+          case ChannelTypes.STORE: {
+            const StoreChannel = Structures.get('StoreChannel');
+            channel = new StoreChannel(guild, data);
+            break;
+          }
         }
-        guild.channels.set(channel.id, channel);
+        if (channel) guild.channels.cache.set(channel.id, channel);
       }
     }
     return channel;
+  }
+
+  toJSON(...props) {
+    return super.toJSON({ createdTimestamp: true }, ...props);
   }
 }
 

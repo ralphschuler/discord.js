@@ -1,15 +1,22 @@
-const Discord = require('../src');
+'use strict';
+
 const { token, prefix, owner } = require('./auth.js');
+const Discord = require('../src');
 
 // eslint-disable-next-line no-console
 const log = (...args) => console.log(process.uptime().toFixed(3), ...args);
 
-const client = new Discord.Client();
+const client = new Discord.Client({
+  shardCount: 2,
+  intents: Discord.Intents.NON_PRIVILEGED,
+});
 
 client.on('debug', log);
 client.on('ready', () => {
   log('READY', client.user.tag, client.user.id);
 });
+client.on('rateLimit', log);
+client.on('error', console.error);
 
 const commands = {
   eval: message => {
@@ -25,6 +32,7 @@ const commands = {
     }
     message.channel.send(res, { code: 'js' });
   },
+  ping: message => message.channel.send('pong'),
 };
 
 client.on('message', message => {

@@ -1,4 +1,7 @@
+'use strict';
+
 const Collector = require('./interfaces/Collector');
+const { Events } = require('../util/Constants');
 
 /**
  * @typedef {CollectorOptions} MessageCollectorOptions
@@ -8,11 +11,12 @@ const Collector = require('./interfaces/Collector');
 
 /**
  * Collects messages on a channel.
+ * Will automatically stop if the channel (`'channelDelete'`) or guild (`'guildDelete'`) are deleted.
  * @extends {Collector}
  */
 class MessageCollector extends Collector {
   /**
-   * @param {TextChannel|DMChannel|GroupDMChannel} channel The channel
+   * @param {TextChannel|DMChannel} channel The channel
    * @param {CollectorFilter} filter The filter to be applied to this collector
    * @param {MessageCollectorOptions} options The options to be applied to this collector
    * @emits MessageCollector#message
@@ -32,47 +36,62 @@ class MessageCollector extends Collector {
      */
     this.received = 0;
 
-    const bulkDeleteListener = (messages => {
+    const bulkDeleteListener = messages => {
       for (const message of messages.values()) this.handleDispose(message);
-    }).bind(this);
+    };
+    this._handleChannelDeletion = this._handleChannelDeletion.bind(this);
+    this._handleGuildDeletion = this._handleGuildDeletion.bind(this);
 
-    this.client.on('message', this.handleCollect);
-    this.client.on('messageDelete', this.handleDispose);
-    this.client.on('messageDeleteBulk', bulkDeleteListener);
+    this.client.incrementMaxListeners();
+    this.client.on(Events.MESSAGE_CREATE, this.handleCollect);
+    this.client.on(Events.MESSAGE_DELETE, this.handleDispose);
+    this.client.on(Events.MESSAGE_BULK_DELETE, bulkDeleteListener);
+    this.client.on(Events.CHANNEL_DELETE, this._handleChannelDeletion);
+    this.client.on(Events.GUILD_DELETE, this._handleGuildDeletion);
 
     this.once('end', () => {
-      this.client.removeListener('message', this.handleCollect);
-      this.client.removeListener('messageDelete', this.handleDispose);
-      this.client.removeListener('messageDeleteBulk', bulkDeleteListener);
+      this.client.removeListener(Events.MESSAGE_CREATE, this.handleCollect);
+      this.client.removeListener(Events.MESSAGE_DELETE, this.handleDispose);
+      this.client.removeListener(Events.MESSAGE_BULK_DELETE, bulkDeleteListener);
+      this.client.removeListener(Events.CHANNEL_DELETE, this._handleChannelDeletion);
+      this.client.removeListener(Events.GUILD_DELETE, this._handleGuildDeletion);
+      this.client.decrementMaxListeners();
     });
   }
 
   /**
-   * Handle a message for possible collection.
+   * Handles a message for possible collection.
    * @param {Message} message The message that could be collected
-   * @returns {?{key: Snowflake, value: Message}}
+   * @returns {?Snowflake}
    * @private
    */
   collect(message) {
+    /**
+     * Emitted whenever a message is collected.
+     * @event MessageCollector#collect
+     * @param {Message} message The message that was collected
+     */
     if (message.channel.id !== this.channel.id) return null;
     this.received++;
-    return {
-      key: message.id,
-      value: message,
-    };
+    return message.id;
   }
 
   /**
-   * Handle a message for possible disposal.
-   * @param {Message} message The message that could be disposed
-   * @returns {?string}
+   * Handles a message for possible disposal.
+   * @param {Message} message The message that could be disposed of
+   * @returns {?Snowflake}
    */
   dispose(message) {
+    /**
+     * Emitted whenever a message is disposed of.
+     * @event MessageCollector#dispose
+     * @param {Message} message The message that was disposed of
+     */
     return message.channel.id === this.channel.id ? message.id : null;
   }
 
   /**
-   * Check after un/collection to see if the collector is done.
+   * Checks after un/collection to see if the collector is done.
    * @returns {?string}
    * @private
    */
@@ -80,6 +99,30 @@ class MessageCollector extends Collector {
     if (this.options.max && this.collected.size >= this.options.max) return 'limit';
     if (this.options.maxProcessed && this.received === this.options.maxProcessed) return 'processedLimit';
     return null;
+  }
+
+  /**
+   * Handles checking if the channel has been deleted, and if so, stops the collector with the reason 'channelDelete'.
+   * @private
+   * @param {GuildChannel} channel The channel that was deleted
+   * @returns {void}
+   */
+  _handleChannelDeletion(channel) {
+    if (channel.id === this.channel.id) {
+      this.stop('channelDelete');
+    }
+  }
+
+  /**
+   * Handles checking if the guild has been deleted, and if so, stops the collector with the reason 'guildDelete'.
+   * @private
+   * @param {Guild} guild The guild that was deleted
+   * @returns {void}
+   */
+  _handleGuildDeletion(guild) {
+    if (this.channel.guild && guild.id === this.channel.guild.id) {
+      this.stop('guildDelete');
+    }
   }
 }
 

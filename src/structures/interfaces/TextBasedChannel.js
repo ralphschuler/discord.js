@@ -1,11 +1,11 @@
-const path = require('path');
+'use strict';
+
+/* eslint-disable import/order */
 const MessageCollector = require('../MessageCollector');
-const Shared = require('../shared');
-const Collection = require('../../util/Collection');
+const APIMessage = require('../APIMessage');
 const Snowflake = require('../../util/Snowflake');
-const Attachment = require('../../structures/Attachment');
-const MessageEmbed = require('../../structures/MessageEmbed');
-const { Error, RangeError, TypeError } = require('../../errors');
+const Collection = require('../../util/Collection');
+const { RangeError, TypeError } = require('../../errors');
 
 /**
  * Interface for classes that have text-channel-like features.
@@ -14,10 +14,10 @@ const { Error, RangeError, TypeError } = require('../../errors');
 class TextBasedChannel {
   constructor() {
     /**
-     * A collection containing the messages sent to this channel
-     * @type {Collection<Snowflake, Message>}
+     * A manager of the messages sent to this channel
+     * @type {MessageManager}
      */
-    this.messages = new Collection();
+    this.messages = new MessageManager(this);
 
     /**
      * The ID of the last message in the channel, if one was sent
@@ -26,10 +26,28 @@ class TextBasedChannel {
     this.lastMessageID = null;
 
     /**
-     * The Message object of the last message in the channel, if one was sent
-     * @type {?Message}
+     * The timestamp when the last pinned message was pinned, if there was one
+     * @type {?number}
      */
-    this.lastMessage = null;
+    this.lastPinTimestamp = null;
+  }
+
+  /**
+   * The Message object of the last message in the channel, if one was sent
+   * @type {?Message}
+   * @readonly
+   */
+  get lastMessage() {
+    return this.messages.cache.get(this.lastMessageID) || null;
+  }
+
+  /**
+   * The date when the last pinned message was pinned, if there was one
+   * @type {?Date}
+   * @readonly
+   */
+  get lastPinAt() {
+    return this.lastPinTimestamp ? new Date(this.lastPinTimestamp) : null;
   }
 
   /**
@@ -37,15 +55,32 @@ class TextBasedChannel {
    * @typedef {Object} MessageOptions
    * @property {boolean} [tts=false] Whether or not the message should be spoken aloud
    * @property {string} [nonce=''] The nonce for the message
+   * @property {string} [content=''] The content for the message
    * @property {MessageEmbed|Object} [embed] An embed for the message
-   * (see [here](https://discordapp.com/developers/docs/resources/channel#embed-object) for more details)
-   * @property {boolean} [disableEveryone=this.client.options.disableEveryone] Whether or not @everyone and @here
-   * should be replaced with plain-text
+   * (see [here](https://discord.com/developers/docs/resources/channel#embed-object) for more details)
+   * @property {MessageMentionOptions} [allowedMentions] Which mentions should be parsed from the message content
    * @property {FileOptions[]|BufferResolvable[]} [files] Files to send with the message
    * @property {string|boolean} [code] Language for optional codeblock formatting to apply
    * @property {boolean|SplitOptions} [split=false] Whether or not the message should be split into multiple messages if
    * it exceeds the character limit. If an object is provided, these are the options for splitting the message
-   * @property {UserResolvable} [reply] User to reply to (prefixes the message with a mention, except in DMs)
+   * @property {MessageResolvable} [replyTo] The message to reply to (must be in the same channel and not system)
+   */
+
+  /**
+   * Options provided to control parsing of mentions by Discord
+   * @typedef {Object} MessageMentionOptions
+   * @property {MessageMentionTypes[]} [parse] Types of mentions to be parsed
+   * @property {Snowflake[]} [users] Snowflakes of Users to be parsed as mentions
+   * @property {Snowflake[]} [roles] Snowflakes of Roles to be parsed as mentions
+   * @property {boolean} [repliedUser] Whether the author of the Message being replied to should be pinged
+   */
+
+  /**
+   * Types of mentions to enable in MessageMentionOptions.
+   * - `roles`
+   * - `users`
+   * - `everyone`
+   * @typedef {string} MessageMentionTypes
    */
 
   /**
@@ -57,205 +92,121 @@ class TextBasedChannel {
   /**
    * Options for splitting a message.
    * @typedef {Object} SplitOptions
-   * @property {number} [maxLength=1950] Maximum character length per message piece
+   * @property {number} [maxLength=2000] Maximum character length per message piece
    * @property {string} [char='\n'] Character to split the message with
    * @property {string} [prepend=''] Text to prepend to every piece except the first
    * @property {string} [append=''] Text to append to every piece except the last
    */
 
   /**
-   * Send a message to this channel.
-   * @param {StringResolvable} [content] Text for the message
-   * @param {MessageOptions} [options={}] Options for the message
+   * Sends a message to this channel.
+   * @param {StringResolvable|APIMessage} [content=''] The content to send
+   * @param {MessageOptions|MessageAdditions} [options={}] The options to provide
    * @returns {Promise<Message|Message[]>}
    * @example
-   * // Send a message
+   * // Send a basic message
    * channel.send('hello!')
    *   .then(message => console.log(`Sent message: ${message.content}`))
    *   .catch(console.error);
-   */
-  send(content, options) { // eslint-disable-line complexity
-    if (!options && typeof content === 'object' && !(content instanceof Array)) {
-      options = content;
-      content = '';
-    } else if (!options) {
-      options = {};
-    }
-
-    if (options instanceof MessageEmbed) options = { embed: options };
-    if (options instanceof Attachment) options = { files: [options.file] };
-
-    if (content instanceof Array || options instanceof Array) {
-      const which = content instanceof Array ? content : options;
-      const attachments = which.filter(item => item instanceof Attachment);
-      if (attachments.length) {
-        options = { files: attachments };
-        if (content instanceof Array) content = '';
-      }
-    }
-
-    if (!options.content) options.content = content;
-
-    if (options.embed && options.embed.files) {
-      if (options.files) options.files = options.files.concat(options.embed.files);
-      else options.files = options.embed.files;
-    }
-
-    if (options.files) {
-      for (let i = 0; i < options.files.length; i++) {
-        let file = options.files[i];
-        if (typeof file === 'string' || Buffer.isBuffer(file)) file = { attachment: file };
-        if (!file.name) {
-          if (typeof file.attachment === 'string') {
-            file.name = path.basename(file.attachment);
-          } else if (file.attachment && file.attachment.path) {
-            file.name = path.basename(file.attachment.path);
-          } else if (file instanceof Attachment) {
-            file = { attachment: file.file, name: path.basename(file.file) || 'file.jpg' };
-          } else {
-            file.name = 'file.jpg';
-          }
-        } else if (file instanceof Attachment) {
-          file = file.file;
-        }
-        options.files[i] = file;
-      }
-
-      return Promise.all(options.files.map(file =>
-        this.client.resolver.resolveFile(file.attachment).then(resource => {
-          file.file = resource;
-          return file;
-        })
-      )).then(files => {
-        options.files = files;
-        return Shared.sendMessage(this, options);
-      });
-    }
-
-    return Shared.sendMessage(this, options);
-  }
-
-  /**
-   * Gets a single message from this channel, regardless of it being cached or not. Since the single message fetching
-   * endpoint is reserved for bot accounts, this abstracts the `fetchMessages` method to obtain the single message when
-   * using a user account.
-   * @param {Snowflake} messageID ID of the message to get
-   * @returns {Promise<Message>}
    * @example
-   * // Get message
-   * channel.fetchMessage('99539446449315840')
-   *   .then(message => console.log(message.content))
+   * // Send a remote file
+   * channel.send({
+   *   files: ['https://cdn.discordapp.com/icons/222078108977594368/6e1019b3179d71046e463a75915e7244.png?size=2048']
+   * })
+   *   .then(console.log)
+   *   .catch(console.error);
+   * @example
+   * // Send a local file
+   * channel.send({
+   *   files: [{
+   *     attachment: 'entire/path/to/file.jpg',
+   *     name: 'file.jpg'
+   *   }]
+   * })
+   *   .then(console.log)
+   *   .catch(console.error);
+   * @example
+   * // Send an embed with a local image inside
+   * channel.send('This is an embed', {
+   *   embed: {
+   *     thumbnail: {
+   *          url: 'attachment://file.jpg'
+   *       }
+   *    },
+   *    files: [{
+   *       attachment: 'entire/path/to/file.jpg',
+   *       name: 'file.jpg'
+   *    }]
+   * })
+   *   .then(console.log)
    *   .catch(console.error);
    */
-  fetchMessage(messageID) {
-    const Message = require('../Message');
-    if (!this.client.user.bot) {
-      return this.fetchMessages({ limit: 1, around: messageID })
-        .then(messages => {
-          const msg = messages.get(messageID);
-          if (!msg) throw new Error('MESSAGE_MISSING');
-          return msg;
-        });
+  async send(content, options) {
+    const User = require('../User');
+    const GuildMember = require('../GuildMember');
+
+    if (this instanceof User || this instanceof GuildMember) {
+      return this.createDM().then(dm => dm.send(content, options));
     }
-    return this.client.api.channels[this.id].messages[messageID].get()
-      .then(data => {
-        const msg = data instanceof Message ? data : new Message(this, data, this.client);
-        this._cacheMessage(msg);
-        return msg;
-      });
-  }
 
-  /**
-   * The parameters to pass in when requesting previous messages from a channel. `around`, `before` and
-   * `after` are mutually exclusive. All the parameters are optional.
-   * @typedef {Object} ChannelLogsQueryOptions
-   * @property {number} [limit=50] Number of messages to acquire
-   * @property {Snowflake} [before] ID of a message to get the messages that were posted before it
-   * @property {Snowflake} [after] ID of a message to get the messages that were posted after it
-   * @property {Snowflake} [around] ID of a message to get the messages that were posted around it
-   */
+    let apiMessage;
 
-  /**
-   * Gets the past messages sent in this channel. Resolves with a collection mapping message ID's to Message objects.
-   * @param {ChannelLogsQueryOptions} [options={}] Query parameters to pass in
-   * @returns {Promise<Collection<Snowflake, Message>>}
-   * @example
-   * // Get messages
-   * channel.fetchMessages({limit: 10})
-   *   .then(messages => console.log(`Received ${messages.size} messages`))
-   *   .catch(console.error);
-   */
-  fetchMessages(options = {}) {
-    const Message = require('../Message');
-    return this.client.api.channels[this.id].messages.get({ query: options })
-      .then(data => {
-        const messages = new Collection();
-        for (const message of data) {
-          const msg = new Message(this, message, this.client);
-          messages.set(message.id, msg);
-          this._cacheMessage(msg);
-        }
-        return messages;
-      });
-  }
-
-  /**
-   * Fetches the pinned messages of this channel and returns a collection of them.
-   * @returns {Promise<Collection<Snowflake, Message>>}
-   */
-  fetchPinnedMessages() {
-    const Message = require('../Message');
-    return this.client.api.channels[this.id].pins.get().then(data => {
-      const messages = new Collection();
-      for (const message of data) {
-        const msg = new Message(this, message, this.client);
-        messages.set(message.id, msg);
-        this._cacheMessage(msg);
+    if (content instanceof APIMessage) {
+      apiMessage = content.resolveData();
+    } else {
+      apiMessage = APIMessage.create(this, content, options).resolveData();
+      if (Array.isArray(apiMessage.data.content)) {
+        return Promise.all(apiMessage.split().map(this.send.bind(this)));
       }
-      return messages;
-    });
-  }
+    }
 
-  /**
-   * Performs a search within the channel.
-   * <warn>This is only available when using a user account.</warn>
-   * @param {MessageSearchOptions} [options={}] Options to pass to the search
-   * @returns {Promise<MessageSearchResult>}
-   * @example
-   * channel.search({
-   *   content: 'discord.js',
-   *   before: '2016-11-17'
-   * }).then(res => {
-   *   const hit = res.results[0].find(m => m.hit).content;
-   *   console.log(`I found: **${hit}**, total results: ${res.total}`);
-   * }).catch(console.error);
-   */
-  search(options = {}) {
-    return Shared.search(this, options);
+    const { data, files } = await apiMessage.resolveFiles();
+    return this.client.api.channels[this.id].messages
+      .post({ data, files })
+      .then(d => this.client.actions.MessageCreate.handle(d).message);
   }
 
   /**
    * Starts a typing indicator in the channel.
-   * @param {number} [count] The number of times startTyping should be considered to have been called
+   * @param {number} [count=1] The number of times startTyping should be considered to have been called
+   * @returns {Promise} Resolves once the bot stops typing gracefully, or rejects when an error occurs
    * @example
-   * // Start typing in a channel
+   * // Start typing in a channel, or increase the typing count by one
    * channel.startTyping();
+   * @example
+   * // Start typing in a channel with a typing count of five, or set it to five
+   * channel.startTyping(5);
    */
   startTyping(count) {
     if (typeof count !== 'undefined' && count < 1) throw new RangeError('TYPING_COUNT');
-    if (!this.client.user._typing.has(this.id)) {
-      const endpoint = this.client.api.channels[this.id].typing;
-      this.client.user._typing.set(this.id, {
-        count: count || 1,
-        interval: this.client.setInterval(() => {
-          endpoint.post();
-        }, 9000),
-      });
-      endpoint.post();
-    } else {
+    if (this.client.user._typing.has(this.id)) {
       const entry = this.client.user._typing.get(this.id);
       entry.count = count || entry.count + 1;
+      return entry.promise;
     }
+
+    const entry = {};
+    entry.promise = new Promise((resolve, reject) => {
+      const endpoint = this.client.api.channels[this.id].typing;
+      Object.assign(entry, {
+        count: count || 1,
+        interval: this.client.setInterval(() => {
+          endpoint.post().catch(error => {
+            this.client.clearInterval(entry.interval);
+            this.client.user._typing.delete(this.id);
+            reject(error);
+          });
+        }, 9000),
+        resolve,
+      });
+      endpoint.post().catch(error => {
+        this.client.clearInterval(entry.interval);
+        this.client.user._typing.delete(this.id);
+        reject(error);
+      });
+      this.client.user._typing.set(this.id, entry);
+    });
+    return entry.promise;
   }
 
   /**
@@ -264,10 +215,10 @@ class TextBasedChannel {
    * <info>It can take a few seconds for the client user to stop typing.</info>
    * @param {boolean} [force=false] Whether or not to reset the call count and force the indicator to stop
    * @example
-   * // Stop typing in a channel
+   * // Reduce the typing count by one and stop typing if it reached 0
    * channel.stopTyping();
    * @example
-   * // Force typing to fully stop in a channel
+   * // Force typing to fully stop regardless of typing count
    * channel.stopTyping(true);
    */
   stopTyping(force = false) {
@@ -277,6 +228,7 @@ class TextBasedChannel {
       if (entry.count <= 0 || force) {
         this.client.clearInterval(entry.interval);
         this.client.user._typing.delete(this.id);
+        entry.resolve();
       }
     }
   }
@@ -307,10 +259,8 @@ class TextBasedChannel {
    * @returns {MessageCollector}
    * @example
    * // Create a message collector
-   * const collector = channel.createMessageCollector(
-   *   m => m.content.includes('discord'),
-   *   { time: 15000 }
-   * );
+   * const filter = m => m.content.includes('discord');
+   * const collector = channel.createMessageCollector(filter, { time: 15000 });
    * collector.on('collect', m => console.log(`Collected ${m.content}`));
    * collector.on('end', collected => console.log(`Collected ${collected.size} items`));
    */
@@ -325,8 +275,8 @@ class TextBasedChannel {
    */
 
   /**
-   * Similar to createCollector but in promise form. Resolves with a collection of messages that pass the specified
-   * filter.
+   * Similar to createMessageCollector but in promise form.
+   * Resolves with a collection of messages that pass the specified filter.
    * @param {CollectorFilter} filter The filter function to use
    * @param {AwaitMessagesOptions} [options={}] Optional options to pass to the internal collector
    * @returns {Promise<Collection<Snowflake, Message>>}
@@ -352,81 +302,83 @@ class TextBasedChannel {
   }
 
   /**
-   * Bulk delete given messages that are newer than two weeks.
-   * <warn>This is only available when using a bot account.</warn>
-   * @param {Collection<Snowflake, Message>|Message[]|number} messages Messages or number of messages to delete
+   * Bulk deletes given messages that are newer than two weeks.
+   * @param {Collection<Snowflake, Message>|MessageResolvable[]|number} messages
+   * Messages or number of messages to delete
    * @param {boolean} [filterOld=false] Filter messages to remove those which are older than two weeks automatically
    * @returns {Promise<Collection<Snowflake, Message>>} Deleted messages
+   * @example
+   * // Bulk delete messages
+   * channel.bulkDelete(5)
+   *   .then(messages => console.log(`Bulk deleted ${messages.size} messages`))
+   *   .catch(console.error);
    */
-  bulkDelete(messages, filterOld = false) {
-    if (!isNaN(messages)) return this.fetchMessages({ limit: messages }).then(msgs => this.bulkDelete(msgs, filterOld));
-    if (messages instanceof Array || messages instanceof Collection) {
-      let messageIDs = messages instanceof Collection ? messages.keyArray() : messages.map(m => m.id);
+  async bulkDelete(messages, filterOld = false) {
+    if (Array.isArray(messages) || messages instanceof Collection) {
+      let messageIDs = messages instanceof Collection ? messages.keyArray() : messages.map(m => m.id || m);
       if (filterOld) {
-        messageIDs = messageIDs.filter(id =>
-          Date.now() - Snowflake.deconstruct(id).date.getTime() < 1209600000
-        );
+        messageIDs = messageIDs.filter(id => Date.now() - Snowflake.deconstruct(id).date.getTime() < 1209600000);
       }
-      return this.client.api.channels[this.id].messages['bulk-delete']
-        .post({ data: { messages: messageIDs } })
-        .then(() =>
-          this.client.actions.MessageDeleteBulk.handle({
-            channel_id: this.id,
-            ids: messageIDs,
-          }).messages
+      if (messageIDs.length === 0) return new Collection();
+      if (messageIDs.length === 1) {
+        await this.client.api.channels(this.id).messages(messageIDs[0]).delete();
+        const message = this.client.actions.MessageDelete.getMessage(
+          {
+            message_id: messageIDs[0],
+          },
+          this,
         );
+        return message ? new Collection([[message.id, message]]) : new Collection();
+      }
+      await this.client.api.channels[this.id].messages['bulk-delete'].post({ data: { messages: messageIDs } });
+      return messageIDs.reduce(
+        (col, id) =>
+          col.set(
+            id,
+            this.client.actions.MessageDeleteBulk.getMessage(
+              {
+                message_id: id,
+              },
+              this,
+            ),
+          ),
+        new Collection(),
+      );
+    }
+    if (!isNaN(messages)) {
+      const msgs = await this.messages.fetch({ limit: messages });
+      return this.bulkDelete(msgs, filterOld);
     }
     throw new TypeError('MESSAGE_BULK_DELETE_TYPE');
-  }
-
-  /**
-   * Marks all messages in this channel as read.
-   * <warn>This is only available when using a user account.</warn>
-   * @returns {Promise<TextChannel|GroupDMChannel|DMChannel>}
-   */
-  acknowledge() {
-    if (!this.lastMessageID) return Promise.resolve(this);
-    return this.client.api.channels[this.id].messages[this.lastMessageID].ack
-      .post({ data: { token: this.client.rest._ackToken } })
-      .then(res => {
-        if (res.token) this.client.rest._ackToken = res.token;
-        return this;
-      });
-  }
-
-  _cacheMessage(message) {
-    const maxSize = this.client.options.messageCacheMaxSize;
-    if (maxSize === 0) return null;
-    if (this.messages.size >= maxSize && maxSize > 0) this.messages.delete(this.messages.firstKey());
-    this.messages.set(message.id, message);
-    return message;
   }
 
   static applyToClass(structure, full = false, ignore = []) {
     const props = ['send'];
     if (full) {
       props.push(
-        '_cacheMessage',
-        'acknowledge',
-        'fetchMessages',
-        'fetchMessage',
-        'search',
+        'lastMessage',
+        'lastPinAt',
         'bulkDelete',
         'startTyping',
         'stopTyping',
         'typing',
         'typingCount',
-        'fetchPinnedMessages',
         'createMessageCollector',
-        'awaitMessages'
+        'awaitMessages',
       );
     }
     for (const prop of props) {
       if (ignore.includes(prop)) continue;
-      Object.defineProperty(structure.prototype, prop,
-        Object.getOwnPropertyDescriptor(TextBasedChannel.prototype, prop));
+      Object.defineProperty(
+        structure.prototype,
+        prop,
+        Object.getOwnPropertyDescriptor(TextBasedChannel.prototype, prop),
+      );
     }
   }
 }
 
 module.exports = TextBasedChannel;
+
+// Fixes Circular
+const MessageManager = require('../../managers/MessageManager');

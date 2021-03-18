@@ -1,9 +1,12 @@
-const Discord = require('../');
+'use strict';
+
 const { token } = require('./auth.json');
+const Discord = require('../src');
 
 const client = new Discord.Client({
-  shardId: process.argv[2],
+  shards: process.argv[2],
   shardCount: process.argv[3],
+  intents: Discord.Intents.NON_PRIVILEGED,
 });
 
 client.on('message', msg => {
@@ -20,12 +23,13 @@ client.on('message', msg => {
 process.send(123);
 
 client.on('ready', () => {
-  console.log('Ready', client.options.shardId);
-  if (client.options.shardId === 0)
+  console.log('Ready', client.options.shards);
+  if (client.options.shards === 0) {
     setTimeout(() => {
       console.log('kek dying');
       client.destroy();
     }, 5000);
+  }
 });
 
 client.login(token).catch(console.error);

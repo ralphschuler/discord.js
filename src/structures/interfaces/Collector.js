@@ -1,17 +1,23 @@
-const Collection = require('../../util/Collection');
+'use strict';
+
 const EventEmitter = require('events');
+const { TypeError } = require('../../errors');
+const Collection = require('../../util/Collection');
+const Util = require('../../util/Util');
 
 /**
  * Filter to be applied to the collector.
  * @typedef {Function} CollectorFilter
  * @param {...*} args Any arguments received by the listener
- * @returns {boolean} To collect or not collect
+ * @param {Collection} collection The items collected by this collector
+ * @returns {boolean|Promise<boolean>}
  */
 
 /**
  * Options to be applied to the collector.
  * @typedef {Object} CollectorOptions
- * @property {number} [time] How long to run the collector for
+ * @property {number} [time] How long to run the collector for in milliseconds
+ * @property {number} [idle] How long to stop the collector after inactivity in milliseconds
  * @property {boolean} [dispose=false] Whether to dispose data when it's deleted
  */
 
@@ -24,7 +30,7 @@ class Collector extends EventEmitter {
     super();
 
     /**
-     * The client
+     * The client that instantiated this Collector
      * @name Collector#client
      * @type {Client}
      * @readonly
@@ -62,10 +68,22 @@ class Collector extends EventEmitter {
      */
     this._timeout = null;
 
+    /**
+     * Timeout for cleanup due to inactivity
+     * @type {?Timeout}
+     * @private
+     */
+    this._idletimeout = null;
+
+    if (typeof filter !== 'function') {
+      throw new TypeError('INVALID_TYPE', 'filter', 'function');
+    }
+
     this.handleCollect = this.handleCollect.bind(this);
     this.handleDispose = this.handleDispose.bind(this);
 
     if (options.time) this._timeout = this.client.setTimeout(() => this.stop('time'), options.time);
+    if (options.idle) this._idletimeout = this.client.setTimeout(() => this.stop('idle'), options.idle);
   }
 
   /**
@@ -73,19 +91,24 @@ class Collector extends EventEmitter {
    * @param {...*} args The arguments emitted by the listener
    * @emits Collector#collect
    */
-  handleCollect(...args) {
+  async handleCollect(...args) {
     const collect = this.collect(...args);
-    if (!collect || !this.filter(...args)) return;
 
-    this.collected.set(collect.key, collect.value);
+    if (collect && (await this.filter(...args, this.collected))) {
+      this.collected.set(collect, args[0]);
 
-    /**
-     * Emitted whenever an element is collected.
-     * @event Collector#collect
-     * @param {*} element The element that got collected
-     * @param {...*} args The arguments emitted by the listener
-     */
-    this.emit('collect', collect.value, ...args);
+      /**
+       * Emitted whenever an element is collected.
+       * @event Collector#collect
+       * @param {...*} args The arguments emitted by the listener
+       */
+      this.emit('collect', ...args);
+
+      if (this._idletimeout) {
+        this.client.clearTimeout(this._idletimeout);
+        this._idletimeout = this.client.setTimeout(() => this.stop('idle'), this.options.idle);
+      }
+    }
     this.checkEnd();
   }
 
@@ -99,23 +122,20 @@ class Collector extends EventEmitter {
 
     const dispose = this.dispose(...args);
     if (!dispose || !this.filter(...args) || !this.collected.has(dispose)) return;
-
-    const value = this.collected.get(dispose);
     this.collected.delete(dispose);
 
     /**
-     * Emitted whenever an element has been disposed.
+     * Emitted whenever an element is disposed of.
      * @event Collector#dispose
-     * @param {*} element The element that was disposed
      * @param {...*} args The arguments emitted by the listener
      */
-    this.emit('dispose', value, ...args);
+    this.emit('dispose', ...args);
     this.checkEnd();
   }
 
   /**
-   * Return a promise that resolves with the next collected element;
-   * rejects with collected elements if the collector finishes without receving a next element
+   * Returns a promise that resolves with the next collected element;
+   * rejects with collected elements if the collector finishes without receiving a next element
    * @type {Promise}
    * @readonly
    */
@@ -147,14 +167,21 @@ class Collector extends EventEmitter {
   }
 
   /**
-   * Stop this collector and emit the `end` event.
+   * Stops this collector and emits the `end` event.
    * @param {string} [reason='user'] The reason this collector is ending
    * @emits Collector#end
    */
   stop(reason = 'user') {
     if (this.ended) return;
 
-    if (this._timeout) this.client.clearTimeout(this._timeout);
+    if (this._timeout) {
+      this.client.clearTimeout(this._timeout);
+      this._timeout = null;
+    }
+    if (this._idletimeout) {
+      this.client.clearTimeout(this._idletimeout);
+      this._idletimeout = null;
+    }
     this.ended = true;
 
     /**
@@ -167,11 +194,63 @@ class Collector extends EventEmitter {
   }
 
   /**
-   * Check whether the collector should end, and if so, end it.
+   * Resets the collectors timeout and idle timer.
+   * @param {Object} [options] Options
+   * @param {number} [options.time] How long to run the collector for in milliseconds
+   * @param {number} [options.idle] How long to stop the collector after inactivity in milliseconds
+   */
+  resetTimer({ time, idle } = {}) {
+    if (this._timeout) {
+      this.client.clearTimeout(this._timeout);
+      this._timeout = this.client.setTimeout(() => this.stop('time'), time || this.options.time);
+    }
+    if (this._idletimeout) {
+      this.client.clearTimeout(this._idletimeout);
+      this._idletimeout = this.client.setTimeout(() => this.stop('idle'), idle || this.options.idle);
+    }
+  }
+
+  /**
+   * Checks whether the collector should end, and if so, ends it.
    */
   checkEnd() {
     const reason = this.endReason();
     if (reason) this.stop(reason);
+  }
+
+  /**
+   * Allows collectors to be consumed with for-await-of loops
+   * @see {@link https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Statements/for-await...of}
+   */
+  async *[Symbol.asyncIterator]() {
+    const queue = [];
+    const onCollect = item => queue.push(item);
+    this.on('collect', onCollect);
+
+    try {
+      while (queue.length || !this.ended) {
+        if (queue.length) {
+          yield queue.shift();
+        } else {
+          // eslint-disable-next-line no-await-in-loop
+          await new Promise(resolve => {
+            const tick = () => {
+              this.removeListener('collect', tick);
+              this.removeListener('end', tick);
+              return resolve();
+            };
+            this.on('collect', tick);
+            this.on('end', tick);
+          });
+        }
+      }
+    } finally {
+      this.removeListener('collect', onCollect);
+    }
+  }
+
+  toJSON() {
+    return Util.flatten(this);
   }
 
   /* eslint-disable no-empty-function, valid-jsdoc */
